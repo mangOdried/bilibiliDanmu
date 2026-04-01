@@ -31,12 +31,6 @@ public final class LiveChatBuffer {
         }
     }
 
-    public void removeListener(Consumer<JSONObject> listener) {
-        if (listener != null) {
-            listeners.remove(listener);
-        }
-    }
-
     public void append(String user, String text) {
         String u = user == null ? "" : user;
         String t = text == null ? "" : text;
