@@ -4,7 +4,6 @@ import com.aayushatharva.brotli4j.Brotli4jLoader;
 import com.aayushatharva.brotli4j.decoder.BrotliInputStream;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
-import jakarta.websocket.OnMessage;
 import org.java_websocket.client.WebSocketClient;
 import org.java_websocket.handshake.ServerHandshake;
 import pojo.Credential;
@@ -21,7 +20,6 @@ import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.cert.X509Certificate;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.Executors;
@@ -119,7 +117,6 @@ public class BiliDanmuWebSocketClient extends WebSocketClient {
     public void onMessage(String s) {
     }
 
-    @OnMessage
     public void onMessage(ByteBuffer byteBuffer) {
         try {
             this.unpack(byteBuffer);
@@ -226,7 +223,6 @@ public class BiliDanmuWebSocketClient extends WebSocketClient {
             if (Opt.AUTH == code) {
                 stream.writeBytes(jsonStr);
             }
-            System.out.println(Arrays.toString(data.toByteArray()));
             return data.toByteArray();
         }
     }
@@ -236,7 +232,7 @@ public class BiliDanmuWebSocketClient extends WebSocketClient {
         short headLength = byteBuffer.getShort();
         short protVer = byteBuffer.getShort();
         int optCode = byteBuffer.getInt();
-        int sequence = byteBuffer.getInt();
+        byteBuffer.getInt(); // skip sequence
 
         if (Opt.HEARTBEAT_REPLY == optCode) {
             System.out.println("这是服务端心跳回包");
@@ -244,7 +240,7 @@ public class BiliDanmuWebSocketClient extends WebSocketClient {
         byte[] contentBytes = new byte[packageLen - headLength];
         byteBuffer.get(contentBytes);
 
-        if (Version.Brotli == protVer) {
+        if (Version.BROTLI == protVer) {
             unpack(ByteBuffer.wrap(decompressBrotli(contentBytes)));
             return;
         }
@@ -289,18 +285,18 @@ public class BiliDanmuWebSocketClient extends WebSocketClient {
         }
     }
 
-    public interface Opt {
-        short HEARTBEAT = 2;
-        short HEARTBEAT_REPLY = 3;
-        short SEND_SMS_REPLY = 5;
-        short AUTH = 7;
-        short AUTH_REPLY = 8;
+    static final class Opt {
+        static final short HEARTBEAT = 2;
+        static final short HEARTBEAT_REPLY = 3;
+        static final short SEND_SMS_REPLY = 5;
+        static final short AUTH = 7;
+        static final short AUTH_REPLY = 8;
+        private Opt() {}
     }
 
-    public interface Version {
-        short NORMAL = 0;
-        short ZIP = 2;
-        short Brotli = 3;
+    static final class Version {
+        static final short BROTLI = 3;
+        private Version() {}
     }
 
     public static byte[] decompressBrotli(byte[] data) throws IOException {
