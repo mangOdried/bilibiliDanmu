@@ -13,15 +13,19 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
-import java.net.URL;
+import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public class BiliLiveSongService {
+    private static final Pattern NUMERIC_PATTERN = Pattern.compile("\\d+");
+    private static final Pattern UNSAFE_FILENAME_CHARS = Pattern.compile("[\\\\/:*?\"<>|]");
+
     private final PlayList playList;
     private final ExecutorService downloadExecutor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "beatmap-download");
@@ -98,10 +102,14 @@ public class BiliLiveSongService {
 
         Song song = new Song(username, resolved.sid);
         song.setDownloadStatus(BeatmapDownloadStatus.PENDING);
-        try {
-            playList.GetSongMessage(song);
-        } catch (Exception e) {
-            System.err.println("获取歌曲标题失败，使用ID兜底: " + e.getMessage());
+        if (resolved.title != null && !resolved.title.trim().isEmpty()) {
+            song.setSongTitle(resolved.title);
+        } else {
+            try {
+                playList.fetchSongTitle(song);
+            } catch (Exception e) {
+                System.err.println("获取歌曲标题失败，使用ID兜底: " + e.getMessage());
+            }
         }
         if (song.getSongTitle() == null || song.getSongTitle().trim().isEmpty()) {
             song.setSongTitle(String.valueOf(resolved.sid));
@@ -148,13 +156,13 @@ public class BiliLiveSongService {
         if (str == null || str.isEmpty()) {
             return false;
         }
-        return str.matches("\\d+");
+        return NUMERIC_PATTERN.matcher(str).matches();
     }
 
     private ResolvedBeatmap resolveById(String idStr) {
         try {
             String url = "https://api.sayobot.cn/v2/beatmapinfo?0=" + idStr;
-            HttpURLConnection con = (HttpURLConnection) new URL(url).openConnection();
+            HttpURLConnection con = (HttpURLConnection) URI.create(url).toURL().openConnection();
             con.setRequestMethod("GET");
             con.setRequestProperty("User-Agent", "Mozilla/5.0");
             con.setRequestProperty("Accept", "application/json");
@@ -241,7 +249,7 @@ public class BiliLiveSongService {
     private ResolvedBeatmap resolveByKeyword(String keyword) {
         try {
             String url = "https://api.sayobot.cn/?post";
-            HttpURLConnection con = (HttpURLConnection) new URL(url).openConnection();
+            HttpURLConnection con = (HttpURLConnection) URI.create(url).toURL().openConnection();
             con.setRequestMethod("POST");
             con.setRequestProperty("User-Agent", "Mozilla/5.0");
             con.setRequestProperty("Accept", "application/json");
@@ -278,11 +286,11 @@ public class BiliLiveSongService {
     }
 
     private String sanitizeFileName(String name) {
-        return name.replaceAll("[\\\\/:*?\"<>|]", "_");
+        return UNSAFE_FILENAME_CHARS.matcher(name).replaceAll("_");
     }
 
     private String downloadToFile(String urlStr, String dirName, String displayName) throws IOException {
-        HttpURLConnection con = (HttpURLConnection) new URL(urlStr).openConnection();
+        HttpURLConnection con = (HttpURLConnection) URI.create(urlStr).toURL().openConnection();
         con.setRequestMethod("GET");
         con.setRequestProperty("User-Agent", "Mozilla/5.0");
         con.setRequestProperty("Accept", "*/*");

@@ -56,7 +56,7 @@ public class PlaylistHttpServer {
     private String playlistEnvelopeJson() {
         JSONObject w = new JSONObject();
         w.put("type", "playlist");
-        w.put("payload", JSONObject.parseObject(buildPlaylistJson()));
+        w.put("payload", buildPlaylistObject());
         return w.toJSONString();
     }
 
@@ -124,7 +124,7 @@ public class PlaylistHttpServer {
         return null;
     }
 
-    private String buildPlaylistJson() {
+    private JSONObject buildPlaylistObject() {
         PlayList pl = PlayList.getInstance();
         JSONObject root = new JSONObject();
         root.put("current", null);
@@ -145,7 +145,7 @@ public class PlaylistHttpServer {
             root.put("canPrev", pl.getHistoryCount() > 0);
             root.put("canNext", current != null || !queue.isEmpty());
         }
-        return root.toJSONString();
+        return root;
     }
 
     private void sendJson(HttpExchange exchange, int code, JSONObject body) throws IOException {
@@ -179,7 +179,7 @@ public class PlaylistHttpServer {
             sendJson(exchange, 409, body);
             return;
         }
-        body.put("snapshot", JSONObject.parseObject(buildPlaylistJson()));
+        body.put("snapshot", buildPlaylistObject());
         sendJson(exchange, 200, body);
     }
 
@@ -204,7 +204,7 @@ public class PlaylistHttpServer {
                 exchange.sendResponseHeaders(405, -1);
                 return;
             }
-            String body = buildPlaylistJson();
+            String body = buildPlaylistObject().toJSONString();
             byte[] resp = body.getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().add("Content-Type", "application/json; charset=utf-8");
             exchange.sendResponseHeaders(200, resp.length);
