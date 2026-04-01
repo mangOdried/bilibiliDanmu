@@ -5,44 +5,43 @@ import com.alibaba.fastjson2.JSONObject;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
-import java.net.URL;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 public class WbiKeyManager {
-    private static String imgKey = null;
-    private static String subKey = null;
+    private static final Pattern KEY_PATTERN = Pattern.compile("/([a-zA-Z0-9]+)\\.png");
+
+    private static volatile String imgKey = null;
+    private static volatile String subKey = null;
 
     public static void refreshWbiKeys() {
         try {
-            URL url = new URL("https://api.bilibili.com/x/web-interface/nav");
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            HttpURLConnection conn = (HttpURLConnection) URI.create("https://api.bilibili.com/x/web-interface/nav").toURL().openConnection();
             conn.setRequestMethod("GET");
             conn.setRequestProperty("User-Agent", "Mozilla/5.0");
             conn.setRequestProperty("Accept", "application/json");
 
-            BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
-            String result = reader.lines().reduce("", (a, b) -> a + b);
-            reader.close();
+            String result;
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))) {
+                result = reader.lines().collect(Collectors.joining());
+            }
 
             JSONObject json = JSONObject.parseObject(result);
             JSONObject data = json.getJSONObject("data");
             JSONObject wbiImg = data.getJSONObject("wbi_img");
 
-            String imgUrl = wbiImg.getString("img_url");
-            String subUrl = wbiImg.getString("sub_url");
-
-            imgKey = extractKey(imgUrl);
-            subKey = extractKey(subUrl);
-
+            imgKey = extractKey(wbiImg.getString("img_url"));
+            subKey = extractKey(wbiImg.getString("sub_url"));
         } catch (Exception e) {
             throw new RuntimeException("WBI密钥获取失败", e);
         }
     }
 
     private static String extractKey(String url) {
-        Pattern pattern = Pattern.compile("/([a-zA-Z0-9]+)\\.png");
-        Matcher matcher = pattern.matcher(url);
+        Matcher matcher = KEY_PATTERN.matcher(url);
         if (matcher.find()) {
             return matcher.group(1);
         }
