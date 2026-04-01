@@ -1,16 +1,9 @@
 package org.example;
 
-
 import com.alibaba.fastjson2.JSONObject;
-import jakarta.websocket.DeploymentException;
 import pojo.Credential;
+
 import java.io.IOException;
-
-import java.net.URISyntaxException;
-
-import java.security.InvalidKeyException;
-import java.security.NoSuchAlgorithmException;
-
 
 /**
  * 本地入口示例：复制为 src/main/java/org/example/App.java 后填写下列占位符。
@@ -18,11 +11,11 @@ import java.security.NoSuchAlgorithmException;
  */
 public class App {
     public static String cookie = "PASTE_BROWSER_COOKIE_HERE";
-    public static void main(String[] args) throws IOException, NoSuchAlgorithmException, InvalidKeyException, URISyntaxException, DeploymentException {
 
-        BiliRequest biliReqest = new BiliRequest(cookie);
+    public static void main(String[] args) throws IOException {
+        BiliRequest biliRequest = new BiliRequest(cookie);
         int roomIdForApi = 0; // TODO: 替换为直播间长号（room_id）
-        JSONObject danmuInfoData = biliReqest.getDanmuInfoData(roomIdForApi);
+        JSONObject danmuInfoData = biliRequest.getDanmuInfoData(roomIdForApi);
         int uid = 0; // TODO: 替换为你的 B 站 UID
         String buvid3 = "buvid3=..."; // TODO: 与浏览器一致的 buvid3 串
         Credential credential = new Credential(uid, danmuInfoData.getInteger("room_id"), buvid3, danmuInfoData.getString("token"));
@@ -35,6 +28,5 @@ public class App {
         }
 
         client.connect();
-
     }
 }
