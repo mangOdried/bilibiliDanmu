@@ -49,12 +49,19 @@ public class BiliLiveSongService {
     /** 关联的播放列表实例 */
     private final PlayList playList;
 
+    /** 歌单容量，同时也决定下载队列的上限（不可能有比歌单更多的下载任务） */
+    private static final int PLAYLIST_CAPACITY = 20;
+
     /**
      * 谱面下载线程池。
      * <p>
-     * 固定核心 2 线程 + 最大 4 线程 + 有界队列（64），
-     * 避免 CachedThreadPool 无上限创建线程的风险。
-     * 空闲线程 60s 后回收；守护线程，主程序退出时自动终止。
+     * 核心 2 线程 + 最大 4 线程 + 有界队列（= 歌单容量）。
+     * <ul>
+     *   <li>队列容量与歌单容量对齐：歌单最多 {@value #PLAYLIST_CAPACITY} 首，
+     *       下载任务数不可能超过该值</li>
+     *   <li>CallerRunsPolicy：万一队列和线程全满，由弹幕处理线程同步执行，天然背压</li>
+     *   <li>空闲线程 60s 回收；守护线程，主程序退出时自动终止</li>
+     * </ul>
      * </p>
      */
     private static final ExecutorService downloadExecutor;
@@ -69,7 +76,7 @@ public class BiliLiveSongService {
         downloadExecutor = new ThreadPoolExecutor(
                 2, 4,
                 60L, TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(64),
+                new LinkedBlockingQueue<>(PLAYLIST_CAPACITY),
                 tf,
                 new ThreadPoolExecutor.CallerRunsPolicy()
         );
@@ -97,7 +104,7 @@ public class BiliLiveSongService {
      * 构造服务实例，同时确保 PlayList 单例已初始化。
      */
     public BiliLiveSongService() {
-        this.playList = PlayList.ensureInstance(20);
+        this.playList = PlayList.ensureInstance(PLAYLIST_CAPACITY);
     }
 
     /**
