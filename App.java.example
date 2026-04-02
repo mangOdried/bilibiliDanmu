@@ -7,19 +7,42 @@ import java.io.IOException;
 
 /**
  * 本地入口示例：复制为 src/main/java/org/example/App.java 后填写下列占位符。
- * 仓库 .gitignore 已忽略 App.java，请勿把真实 Cookie 提交到远程。
+ * <p>
+ * 启动流程：
+ * <ol>
+ *   <li>使用 Cookie 创建 {@link BiliRequest} 实例</li>
+ *   <li>获取弹幕连接信息（真实房间号 + WebSocket 地址 + Token）</li>
+ *   <li>构造认证凭据 {@link Credential}</li>
+ *   <li>启动歌单 HTTP 服务器 {@link PlaylistHttpServer}（端口 8080）</li>
+ *   <li>连接弹幕 WebSocket，开始接收弹幕</li>
+ * </ol>
+ * </p>
+ * <p>
+ * <strong>注意：</strong>仓库 .gitignore 已忽略 App.java，请勿把真实 Cookie 提交到远程。
+ * </p>
  */
 public class App {
+
+    /** B站浏览器 Cookie（请替换为自己的真实值） */
     public static String cookie = "PASTE_BROWSER_COOKIE_HERE";
 
     public static void main(String[] args) throws IOException {
+        // 1. 创建 B站 API 请求客户端
         BiliRequest biliRequest = new BiliRequest(cookie);
+
+        // 2. 获取弹幕连接信息（需填写真实房间号）
         int roomIdForApi = 0; // TODO: 替换为直播间长号（room_id）
         JSONObject danmuInfoData = biliRequest.getDanmuInfoData(roomIdForApi);
+
+        // 3. 构造 WebSocket 认证凭据（需填写真实 UID 和 buvid3）
         int uid = 0; // TODO: 替换为你的 B 站 UID
         String buvid3 = "buvid3=..."; // TODO: 与浏览器一致的 buvid3 串
         Credential credential = new Credential(uid, danmuInfoData.getInteger("room_id"), buvid3, danmuInfoData.getString("token"));
+
+        // 4. 创建弹幕 WebSocket 客户端
         BiliDanmuWebSocketClient client = new BiliDanmuWebSocketClient(BiliDanmuWebSocketClient.generateUri(danmuInfoData), credential);
+
+        // 5. 启动歌单管理 HTTP 服务器
         try {
             PlaylistHttpServer server = new PlaylistHttpServer(8080);
             System.out.println("Playlist HTTP server started at http://127.0.0.1:8080/playlist.html");
@@ -27,6 +50,7 @@ public class App {
             System.err.println("启动 PlaylistHttpServer 失败: " + e.getMessage());
         }
 
+        // 6. 连接弹幕 WebSocket（内置自动重连机制）
         client.connect();
     }
 }
