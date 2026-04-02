@@ -16,10 +16,45 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
+/**
+ * 歌单管理 HTTP 服务器。
+ * <p>
+ * 提供以下能力：
+ * <ul>
+ *   <li>REST API：获取歌单快照、聊天记录、切歌、打开下载文件</li>
+ *   <li>SSE 推送：歌单变化和新弹幕实时推送给浏览器</li>
+ *   <li>静态页面：内嵌 HTML/CSS/JS 的 SonicGhost 播放器 UI</li>
+ * </ul>
+ * </p>
+ * <h3>API 列表</h3>
+ * <table>
+ *   <tr><td>GET  /api/playlist</td><td>返回歌单当前状态 JSON</td></tr>
+ *   <tr><td>GET  /api/chat</td><td>返回聊天缓冲区快照</td></tr>
+ *   <tr><td>POST /api/playlist/next</td><td>切到下一首</td></tr>
+ *   <tr><td>POST /api/playlist/prev</td><td>切到上一首</td></tr>
+ *   <tr><td>POST /api/open-download</td><td>用系统默认程序打开已下载的 .osz 文件</td></tr>
+ *   <tr><td>GET  /sse</td><td>SSE 事件流（歌单+聊天增量推送）</td></tr>
+ *   <tr><td>GET  /playlist.html</td><td>SonicGhost 播放器前端页面</td></tr>
+ * </table>
+ */
 public class PlaylistHttpServer {
+
+    /** JDK 内置 HTTP 服务器实例 */
     private final HttpServer server;
+
+    /** 当前活跃的 SSE 客户端写入器列表（线程安全） */
     private final CopyOnWriteArrayList<PrintWriter> sseClients = new CopyOnWriteArrayList<>();
 
+    /**
+     * 创建并启动 HTTP 服务器。
+     * <p>
+     * 绑定到 127.0.0.1:{port}，注册各路由处理器，
+     * 初始化 PlayList 单例，订阅歌单变化和弹幕增量事件用于 SSE 广播。
+     * </p>
+     *
+     * @param port 监听端口
+     * @throws IOException 服务器创建/启动失败时抛出
+     */
     public PlaylistHttpServer(int port) throws IOException {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
         server.createContext("/api/playlist", new ApiHandler());
@@ -47,6 +82,7 @@ public class PlaylistHttpServer {
         pw.flush();
     }
 
+    /** 发送 SSE 注释帧（心跳保活，防止代理/浏览器超时断开连接） */
     private static void writeSseComment(PrintWriter pw) {
         pw.print(": ping\n\n");
         pw.flush();
@@ -56,10 +92,11 @@ public class PlaylistHttpServer {
     private String playlistEnvelopeJson() {
         JSONObject w = new JSONObject();
         w.put("type", "playlist");
-        w.put("payload", JSONObject.parseObject(buildPlaylistJson()));
+        w.put("payload", buildPlaylistObject());
         return w.toJSONString();
     }
 
+    /** 将聊天增量消息包装为 SSE 信封 JSON（type=chat） */
     private static String chatEnvelopeJson(JSONObject chatPayload) {
         JSONObject w = new JSONObject();
         w.put("type", "chat");
@@ -67,6 +104,7 @@ public class PlaylistHttpServer {
         return w.toJSONString();
     }
 
+    /** 向所有 SSE 客户端广播歌单快照更新，写入失败的客户端会被移除 */
     private void broadcastPlaylist() {
         try {
             String json = playlistEnvelopeJson();
@@ -81,6 +119,7 @@ public class PlaylistHttpServer {
         } catch (Exception ignored) {}
     }
 
+    /** 向所有 SSE 客户端广播一条聊天增量消息 */
     private void broadcastChat(JSONObject line) {
         if (line == null) {
             return;
@@ -98,6 +137,7 @@ public class PlaylistHttpServer {
         } catch (Exception ignored) {}
     }
 
+    /** 将 Song 对象转换为前端可消费的 JSON，包含下载状态和本地文件可用性 */
     private JSONObject songToJson(Song s) {
         JSONObject o = new JSONObject();
         o.put("requester", s.getSongRequester());
@@ -111,6 +151,7 @@ public class PlaylistHttpServer {
         return o;
     }
 
+    /** 在当前曲目和待播队列中查找指定 beatmapId 的歌曲 */
     private static Song findSongByBeatmapId(PlayList pl, int beatmapId) {
         Song current = pl.getCurrentSong();
         if (current != null && current.getBeatMapId() == beatmapId) {
@@ -124,7 +165,8 @@ public class PlaylistHttpServer {
         return null;
     }
 
-    private String buildPlaylistJson() {
+    /** 构建歌单完整状态 JSON（当前曲目 + 待播队列 + 历史信息 + 可操作标志） */
+    private JSONObject buildPlaylistObject() {
         PlayList pl = PlayList.getInstance();
         JSONObject root = new JSONObject();
         root.put("current", null);
@@ -145,9 +187,10 @@ public class PlaylistHttpServer {
             root.put("canPrev", pl.getHistoryCount() > 0);
             root.put("canNext", current != null || !queue.isEmpty());
         }
-        return root.toJSONString();
+        return root;
     }
 
+    /** 向客户端发送 JSON 响应，自动设置 Content-Type 和编码 */
     private void sendJson(HttpExchange exchange, int code, JSONObject body) throws IOException {
         byte[] resp = body.toJSONString().getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().add("Content-Type", "application/json; charset=utf-8");
@@ -157,6 +200,12 @@ public class PlaylistHttpServer {
         }
     }
 
+    /**
+     * 处理切歌请求（上一首/下一首）的通用逻辑。
+     *
+     * @param exchange HTTP 请求上下文
+     * @param isNext   true=下一首, false=上一首
+     */
     private void handleSwitchSong(HttpExchange exchange, boolean isNext) throws IOException {
         if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
             exchange.sendResponseHeaders(405, -1);
@@ -179,10 +228,11 @@ public class PlaylistHttpServer {
             sendJson(exchange, 409, body);
             return;
         }
-        body.put("snapshot", JSONObject.parseObject(buildPlaylistJson()));
+        body.put("snapshot", buildPlaylistObject());
         sendJson(exchange, 200, body);
     }
 
+    /** POST /api/playlist/next — 切到下一首 */
     class NextHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
@@ -190,6 +240,7 @@ public class PlaylistHttpServer {
         }
     }
 
+    /** POST /api/playlist/prev — 切到上一首 */
     class PrevHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
@@ -197,6 +248,7 @@ public class PlaylistHttpServer {
         }
     }
 
+    /** GET /api/playlist — 返回歌单当前状态 JSON */
     class ApiHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
@@ -204,7 +256,7 @@ public class PlaylistHttpServer {
                 exchange.sendResponseHeaders(405, -1);
                 return;
             }
-            String body = buildPlaylistJson();
+            String body = buildPlaylistObject().toJSONString();
             byte[] resp = body.getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().add("Content-Type", "application/json; charset=utf-8");
             exchange.sendResponseHeaders(200, resp.length);
@@ -212,6 +264,7 @@ public class PlaylistHttpServer {
         }
     }
 
+    /** GET /api/chat — 返回聊天缓冲区全量快照 + SSE 活跃客户端数 */
     class ChatApiHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
@@ -230,6 +283,7 @@ public class PlaylistHttpServer {
         }
     }
 
+    /** POST /api/open-download — 用系统默认程序打开指定 beatmapId 对应的已下载 .osz 文件 */
     class OpenDownloadHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
@@ -311,6 +365,13 @@ public class PlaylistHttpServer {
         }
     }
 
+    /**
+     * GET /sse — SSE 事件流端点。
+     * <p>
+     * 建立连接后立即推送一次完整歌单快照，然后长驻等待后续增量事件。
+     * 每 15 秒发送一次 SSE 注释帧作为心跳保活。
+     * </p>
+     */
     class SseHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
@@ -340,6 +401,19 @@ public class PlaylistHttpServer {
         }
     }
 
+    /**
+     * GET /playlist.html — 返回内嵌的 SonicGhost 播放器前端页面。
+     * <p>
+     * 页面包含完整的 HTML + CSS + JavaScript，实现：
+     * <ul>
+     *   <li>当前播放曲目展示（标题、点歌人、下载状态）</li>
+     *   <li>待播队列列表</li>
+     *   <li>实时弹幕聊天面板</li>
+     *   <li>上一首/下一首切歌按钮</li>
+     *   <li>SSE 实时更新 + HTTP 轮询降级</li>
+     * </ul>
+     * </p>
+     */
     class StaticHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
@@ -439,6 +513,7 @@ public class PlaylistHttpServer {
         }
     }
 
+    /** 立即停止 HTTP 服务器 */
     public void stop() {
         server.stop(0);
     }

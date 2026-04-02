@@ -2,60 +2,63 @@ package pojo;
 
 import java.util.Objects;
 
+/**
+ * 歌曲实体类，封装一首用户通过弹幕点播的 osu! 谱面信息。
+ * <p>
+ * 每个 Song 以 {@link #beatMapId} 作为唯一标识，
+ * 两个 Song 相等当且仅当它们的 beatMapId 相同（见 {@link #equals}/{@link #hashCode}）。
+ * </p>
+ * <p>
+ * 下载状态 {@link #downloadStatus} 和本地路径 {@link #downloadLocalPath}
+ * 由后台下载线程异步更新，因此声明为 {@code volatile} 以保证可见性。
+ * </p>
+ */
 public class Song {
-    private String songTitle;    // 歌曲名
-    private String songRequester;// 点歌的用户名
-    private Integer beatMapId;    // 铺面ID
-    private Boolean isRequested  = false; // 是否已经被播放
-    /** 异步下载状态，由后台线程更新 */
+
+    /** 歌曲标题，来自 Sayobot API 查询结果 */
+    private String songTitle;
+
+    /** 发起点歌的用户名（B站弹幕用户） */
+    private String songRequester;
+
+    /** osu! 谱面集 ID（Sayobot sid） */
+    private int beatMapId;
+
+    /** 异步下载状态，由后台线程更新，volatile 保证可见性 */
     private volatile BeatmapDownloadStatus downloadStatus = BeatmapDownloadStatus.PENDING;
-    /** 本机 .osz 绝对路径，仅 DONE 时有值 */
+
+    /** 本机 .osz 文件绝对路径，仅在 {@link BeatmapDownloadStatus#DONE} 时有值 */
     private volatile String downloadLocalPath;
 
-    public Song( String songRequester, int beatMapId ) {
+    /**
+     * 创建一首待点播歌曲。
+     *
+     * @param songRequester 点歌的弹幕用户名
+     * @param beatMapId     osu! 谱面集 ID
+     */
+    public Song(String songRequester, int beatMapId) {
         this.songRequester = songRequester;
         this.beatMapId = beatMapId;
     }
 
-    public BeatmapDownloadStatus getDownloadStatus() {
-        return downloadStatus;
-    }
-
-    public void setDownloadStatus(BeatmapDownloadStatus downloadStatus) {
-        this.downloadStatus = downloadStatus != null ? downloadStatus : BeatmapDownloadStatus.PENDING;
-    }
-
-    public String getDownloadLocalPath() {
-        return downloadLocalPath;
-    }
-
-    public void setDownloadLocalPath(String downloadLocalPath) {
-        this.downloadLocalPath = downloadLocalPath;
-    }
-
-    // 重写 equals 方法：定义“相等”的逻辑
+    /**
+     * 基于 beatMapId 判断两首歌是否为同一首。
+     */
     @Override
     public boolean equals(Object o) {
-        if (this == o) return true; // 同一对象
+        if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
         Song song = (Song) o;
-        return Objects.equals(beatMapId, song.beatMapId) ;
+        return beatMapId == song.beatMapId;
     }
 
-    // 重写 hashCode 方法：用于 HashSet 的快速定位
+    /**
+     * 与 {@link #equals} 一致，仅基于 beatMapId 计算哈希。
+     */
     @Override
     public int hashCode() {
         return Objects.hash(beatMapId);
     }
-    public Boolean getValid() {
-        return valid;
-    }
-
-    public void setValid(Boolean valid) {
-        this.valid = valid;
-    }
-
-    private Boolean valid;       // 是否是有效点歌（例如歌曲不存在时设为 false）
 
     public String getSongTitle() {
         return songTitle;
@@ -81,11 +84,22 @@ public class Song {
         this.beatMapId = beatMapId;
     }
 
-    public Boolean getRequested() {
-        return isRequested;
+    public BeatmapDownloadStatus getDownloadStatus() {
+        return downloadStatus;
     }
 
-    public void setRequested(Boolean requested) {
-        isRequested = requested;
+    /**
+     * 设置下载状态；传入 null 时自动回退为 {@link BeatmapDownloadStatus#PENDING}。
+     */
+    public void setDownloadStatus(BeatmapDownloadStatus downloadStatus) {
+        this.downloadStatus = downloadStatus != null ? downloadStatus : BeatmapDownloadStatus.PENDING;
+    }
+
+    public String getDownloadLocalPath() {
+        return downloadLocalPath;
+    }
+
+    public void setDownloadLocalPath(String downloadLocalPath) {
+        this.downloadLocalPath = downloadLocalPath;
     }
 }

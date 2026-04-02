@@ -13,25 +13,84 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
-import java.net.URL;
+import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
+/**
+ * B站直播点歌核心服务：解析弹幕中的点歌指令，查询谱面信息，入队并异步下载。
+ * <p>
+ * 工作流程：
+ * <ol>
+ *   <li>从弹幕内容中提取"点歌"关键词及其后的参数</li>
+ *   <li>判断参数是数字 ID 还是关键词，分别调用 Sayobot API 解析</li>
+ *   <li>将解析结果构造为 {@link Song} 对象加入 {@link PlayList}</li>
+ *   <li>在后台线程池中异步下载 .osz 谱面文件</li>
+ * </ol>
+ * </p>
+ */
 public class BiliLiveSongService {
-    private final PlayList playList;
-    private final ExecutorService downloadExecutor = Executors.newCachedThreadPool(r -> {
-        Thread t = new Thread(r, "beatmap-download");
-        t.setDaemon(true);
-        return t;
-    });
 
+    /** 预编译：纯数字判断 */
+    private static final Pattern NUMERIC_PATTERN = Pattern.compile("\\d+");
+
+    /** 预编译：文件名中不安全字符 */
+    private static final Pattern UNSAFE_FILENAME_CHARS = Pattern.compile("[\\\\/:*?\"<>|]");
+
+    /** 关联的播放列表实例 */
+    private final PlayList playList;
+
+    /** 歌单容量，同时也决定下载队列的上限（不可能有比歌单更多的下载任务） */
+    private static final int PLAYLIST_CAPACITY = 20;
+
+    /**
+     * 谱面下载线程池。
+     * <p>
+     * 核心 2 线程 + 最大 4 线程 + 有界队列（= 歌单容量）。
+     * <ul>
+     *   <li>队列容量与歌单容量对齐：歌单最多 {@value #PLAYLIST_CAPACITY} 首，
+     *       下载任务数不可能超过该值</li>
+     *   <li>CallerRunsPolicy：万一队列和线程全满，由弹幕处理线程同步执行，天然背压</li>
+     *   <li>空闲线程 60s 回收；守护线程，主程序退出时自动终止</li>
+     * </ul>
+     * </p>
+     */
+    private static final ExecutorService downloadExecutor;
+
+    static {
+        AtomicInteger counter = new AtomicInteger(0);
+        ThreadFactory tf = r -> {
+            Thread t = new Thread(r, "beatmap-download-" + counter.incrementAndGet());
+            t.setDaemon(true);
+            return t;
+        };
+        downloadExecutor = new ThreadPoolExecutor(
+                2, 4,
+                60L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(PLAYLIST_CAPACITY),
+                tf,
+                new ThreadPoolExecutor.CallerRunsPolicy()
+        );
+    }
+
+    /**
+     * Sayobot API 返回的谱面解析结果。
+     */
     private static final class ResolvedBeatmap {
+        /** 谱面集 ID */
         final int sid;
+        /** 艺术家名 */
         final String artist;
+        /** 谱面标题 */
         final String title;
 
         ResolvedBeatmap(int sid, String artist, String title) {
@@ -41,25 +100,48 @@ public class BiliLiveSongService {
         }
     }
 
+    /**
+     * 构造服务实例，同时确保 PlayList 单例已初始化。
+     */
     public BiliLiveSongService() {
-        this.playList = PlayList.ensureInstance(20);
+        this.playList = PlayList.ensureInstance(PLAYLIST_CAPACITY);
     }
 
+    /**
+     * 规范化弹幕文本：去除 BOM、零宽字符等不可见干扰字符。
+     *
+     * @param s 原始弹幕文本
+     * @return 清洗后的文本
+     */
     private static String normalizeDanmuText(String s) {
         if (s == null) {
             return "";
         }
         String t = s.strip();
-        t = t.replace('\uFEFF', ' ')
-                .replace('\u200B', ' ')
-                .replace('\u200C', ' ')
-                .replace('\u200D', ' ')
-                .replace('\u2060', ' ');
+        t = t.replace('\uFEFF', ' ')   // BOM
+                .replace('\u200B', ' ') // 零宽空格
+                .replace('\u200C', ' ') // 零宽非连接符
+                .replace('\u200D', ' ') // 零宽连接符
+                .replace('\u2060', ' ');// 单词连接符
         return t.strip();
     }
 
+    /**
+     * 处理用户弹幕中的点歌请求。
+     * <p>
+     * 识别"点歌 xxx"格式的弹幕，查询 Sayobot 获取谱面信息，
+     * 入队并触发异步下载。若弹幕不符合点歌格式则返回 false。
+     * </p>
+     *
+     * @param content  弹幕内容
+     * @param username 发送弹幕的用户名
+     * @return true — 作为点歌处理了；false — 不是点歌格式
+     * @throws RuntimeException 找不到歌曲或入队失败时抛出
+     */
     public Boolean userAddSong(String content, String username) {
         String raw = normalizeDanmuText(content);
+
+        // 提取"点歌"关键词后面的参数
         String arg;
         if (raw.startsWith("点歌")) {
             arg = raw.substring("点歌".length()).strip();
@@ -74,9 +156,11 @@ public class BiliLiveSongService {
             return false;
         }
 
+        // 根据参数类型选择查询方式：纯数字用 ID 查询，否则用关键词搜索
         ResolvedBeatmap resolved;
         if (isNumeric(arg)) {
             resolved = resolveById(arg);
+            // Sayobot 查不到时，将纯数字直接视为 sid 兜底入队
             if (resolved == null) {
                 try {
                     int parsed = Integer.parseInt(arg);
@@ -96,24 +180,44 @@ public class BiliLiveSongService {
             throw new RuntimeException("未找到歌曲: " + arg);
         }
 
+        // 构造 Song 对象并设置标题
         Song song = new Song(username, resolved.sid);
         song.setDownloadStatus(BeatmapDownloadStatus.PENDING);
-        try {
-            playList.GetSongMessage(song);
-        } catch (Exception e) {
-            System.err.println("获取歌曲标题失败，使用ID兜底: " + e.getMessage());
+
+        // 优先使用 resolve 阶段已获取的标题，避免重复 HTTP 请求
+        if (resolved.title != null && !resolved.title.trim().isEmpty()) {
+            song.setSongTitle(resolved.title);
+        } else {
+            try {
+                playList.fetchSongTitle(song);
+            } catch (Exception e) {
+                System.err.println("获取歌曲标题失败，使用ID兜底: " + e.getMessage());
+            }
         }
         if (song.getSongTitle() == null || song.getSongTitle().trim().isEmpty()) {
             song.setSongTitle(String.valueOf(resolved.sid));
         }
+
+        // 入队
         SongRequestResult result = playList.addSong(song);
         if (!result.isSuccess()) {
             throw new RuntimeException(result.getMessage());
         }
+
+        // 提交异步下载任务
         scheduleDownload(song, resolved);
         return true;
     }
 
+    /**
+     * 在后台线程池中异步下载谱面 .osz 文件。
+     * <p>
+     * 下载开始和结束时均会更新 Song 的状态并通知前端刷新。
+     * </p>
+     *
+     * @param song 对应的歌曲对象
+     * @param meta 解析出的谱面元数据
+     */
     private void scheduleDownload(Song song, ResolvedBeatmap meta) {
         downloadExecutor.execute(() -> {
             song.setDownloadLocalPath(null);
@@ -133,6 +237,9 @@ public class BiliLiveSongService {
         });
     }
 
+    /**
+     * 选择下载文件名所用的标题：优先取解析元数据中的标题，其次取 Song 标题，最后用 sid。
+     */
     private static String pickDownloadTitle(ResolvedBeatmap meta, Song song) {
         if (meta != null && meta.title != null && !meta.title.isEmpty()) {
             return meta.title;
@@ -144,17 +251,26 @@ public class BiliLiveSongService {
         return String.valueOf(song.getBeatMapId());
     }
 
+    /**
+     * 使用预编译正则判断字符串是否为纯数字。
+     */
     private boolean isNumeric(String str) {
         if (str == null || str.isEmpty()) {
             return false;
         }
-        return str.matches("\\d+");
+        return NUMERIC_PATTERN.matcher(str).matches();
     }
 
+    /**
+     * 通过谱面 ID 查询 Sayobot beatmapinfo 接口。
+     *
+     * @param idStr 谱面 ID 字符串
+     * @return 解析结果；失败返回 null
+     */
     private ResolvedBeatmap resolveById(String idStr) {
         try {
             String url = "https://api.sayobot.cn/v2/beatmapinfo?0=" + idStr;
-            HttpURLConnection con = (HttpURLConnection) new URL(url).openConnection();
+            HttpURLConnection con = (HttpURLConnection) URI.create(url).toURL().openConnection();
             con.setRequestMethod("GET");
             con.setRequestProperty("User-Agent", "Mozilla/5.0");
             con.setRequestProperty("Accept", "application/json");
@@ -190,6 +306,23 @@ public class BiliLiveSongService {
         return null;
     }
 
+    /**
+     * 从关键词搜索结果中选出与用户输入最匹配的谱面。
+     * <p>
+     * 评分规则：
+     * <ul>
+     *   <li>标题完全匹配 +1000</li>
+     *   <li>标题包含关键词 +500</li>
+     *   <li>艺术家包含关键词 +200</li>
+     *   <li>标题长度与关键词越接近得分越高</li>
+     *   <li>Sayobot order 权重也纳入评分</li>
+     * </ul>
+     * </p>
+     *
+     * @param data    Sayobot 搜索结果数组
+     * @param keyword 用户输入的关键词
+     * @return 最佳匹配的 JSONObject；若全部为空则返回首个
+     */
     private JSONObject selectBestKeywordMatch(JSONArray data, String keyword) {
         if (data == null || data.isEmpty()) {
             return null;
@@ -238,10 +371,16 @@ public class BiliLiveSongService {
         return best != null ? best : data.getJSONObject(0);
     }
 
+    /**
+     * 通过关键词调用 Sayobot 搜索接口查找谱面。
+     *
+     * @param keyword 搜索关键词
+     * @return 最佳匹配的解析结果；失败返回 null
+     */
     private ResolvedBeatmap resolveByKeyword(String keyword) {
         try {
             String url = "https://api.sayobot.cn/?post";
-            HttpURLConnection con = (HttpURLConnection) new URL(url).openConnection();
+            HttpURLConnection con = (HttpURLConnection) URI.create(url).toURL().openConnection();
             con.setRequestMethod("POST");
             con.setRequestProperty("User-Agent", "Mozilla/5.0");
             con.setRequestProperty("Accept", "application/json");
@@ -277,12 +416,24 @@ public class BiliLiveSongService {
         return null;
     }
 
+    /**
+     * 将文件名中不安全的字符替换为下划线。
+     */
     private String sanitizeFileName(String name) {
-        return name.replaceAll("[\\\\/:*?\"<>|]", "_");
+        return UNSAFE_FILENAME_CHARS.matcher(name).replaceAll("_");
     }
 
+    /**
+     * 将远程文件下载到本地目录。
+     *
+     * @param urlStr      下载 URL
+     * @param dirName     保存目录名
+     * @param displayName 文件显示名（会经过安全化处理）
+     * @return 保存后的绝对路径
+     * @throws IOException 下载失败时抛出
+     */
     private String downloadToFile(String urlStr, String dirName, String displayName) throws IOException {
-        HttpURLConnection con = (HttpURLConnection) new URL(urlStr).openConnection();
+        HttpURLConnection con = (HttpURLConnection) URI.create(urlStr).toURL().openConnection();
         con.setRequestMethod("GET");
         con.setRequestProperty("User-Agent", "Mozilla/5.0");
         con.setRequestProperty("Accept", "*/*");
@@ -306,6 +457,19 @@ public class BiliLiveSongService {
         return outFile.getAbsolutePath();
     }
 
+    /**
+     * 执行谱面 .osz 文件下载。
+     * <p>
+     * 文件从 Sayobot CDN 下载，保存到 downloads 目录下。
+     * URL 格式：{@code https://cu2.sayobot.cn:25225/beatmaps/{dir1}/{dir2}/full?filename=xxx}
+     * </p>
+     *
+     * @param sid    谱面集 ID
+     * @param artist 艺术家名
+     * @param title  谱面标题
+     * @return 下载后的本地文件绝对路径
+     * @throws IOException 下载失败时抛出
+     */
     private String performDownloadToDisk(int sid, String artist, String title) throws IOException {
         if (artist == null) {
             artist = "";
@@ -317,6 +481,7 @@ public class BiliLiveSongService {
         String filenameNoExt = sid + " " + artist + " - " + title;
         String filename = filenameNoExt + ".osz";
         String encodedFilename = URLEncoder.encode(filename, StandardCharsets.UTF_8).replace("+", "%20");
+        // Sayobot CDN 路径按 10000 分片
         int dir1 = sid / 10000;
         String dir2 = String.format("%04d", sid % 10000);
         String downloadUrl = String.format(
