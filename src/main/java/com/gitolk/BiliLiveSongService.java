@@ -18,7 +18,11 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -45,12 +49,31 @@ public class BiliLiveSongService {
     /** 关联的播放列表实例 */
     private final PlayList playList;
 
-    /** 谱面下载线程池（守护线程，主程序退出时自动终止） */
-    private final ExecutorService downloadExecutor = Executors.newCachedThreadPool(r -> {
-        Thread t = new Thread(r, "beatmap-download");
-        t.setDaemon(true);
-        return t;
-    });
+    /**
+     * 谱面下载线程池。
+     * <p>
+     * 固定核心 2 线程 + 最大 4 线程 + 有界队列（64），
+     * 避免 CachedThreadPool 无上限创建线程的风险。
+     * 空闲线程 60s 后回收；守护线程，主程序退出时自动终止。
+     * </p>
+     */
+    private static final ExecutorService downloadExecutor;
+
+    static {
+        AtomicInteger counter = new AtomicInteger(0);
+        ThreadFactory tf = r -> {
+            Thread t = new Thread(r, "beatmap-download-" + counter.incrementAndGet());
+            t.setDaemon(true);
+            return t;
+        };
+        downloadExecutor = new ThreadPoolExecutor(
+                2, 4,
+                60L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(64),
+                tf,
+                new ThreadPoolExecutor.CallerRunsPolicy()
+        );
+    }
 
     /**
      * Sayobot API 返回的谱面解析结果。
